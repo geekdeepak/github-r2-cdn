@@ -22,6 +22,12 @@ env:
 on:
   push:
     branches: [ main ]
+    paths:
+      - '**'
+      - '!README.md'
+      - '!CONTRIBUTING.md'
+      - '!examples/**'
+      - '!.github/workflows/**'
 
 # Add write permissions for the workflow
 permissions:
@@ -38,7 +44,41 @@ jobs:
         token: ${{ secrets.GITHUB_TOKEN }}
         fetch-depth: 0
       
+    - name: Check configuration
+      id: check-config
+      run: |
+        echo "🔍 Checking configuration..."
+        
+        # Check if this is a demo/template repository
+        if [[ "${{ env.BASE_URL }}" == "https://cdn.yourdomain.com" ]] || [[ "${{ env.BUCKET_NAME }}" == "your-bucket-name" ]]; then
+          echo "⚠️ This appears to be a demo repository with placeholder configuration."
+          echo "🎯 To use this workflow:"
+          echo "   1. Change BASE_URL from 'https://cdn.yourdomain.com' to your actual domain"
+          echo "   2. Change BUCKET_NAME from 'your-bucket-name' to your R2 bucket"
+          echo "   3. Add R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, and R2_ACCOUNT_ID secrets"
+          echo "   4. Add images to folders with 'images/' or 'images-webp/' subfolders"
+          echo ""
+          echo "configured=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # Check if required secrets are available
+        if [[ -z "${{ secrets.R2_ACCESS_KEY_ID }}" ]] || [[ -z "${{ secrets.R2_SECRET_ACCESS_KEY }}" ]] || [[ -z "${{ secrets.R2_ACCOUNT_ID }}" ]]; then
+          echo "❌ Missing required R2 secrets. Please add:"
+          echo "   - R2_ACCESS_KEY_ID"
+          echo "   - R2_SECRET_ACCESS_KEY"
+          echo "   - R2_ACCOUNT_ID"
+          echo "   to your GitHub repository secrets."
+          echo ""
+          echo "configured=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        echo "✅ Configuration looks good!"
+        echo "configured=true" >> $GITHUB_OUTPUT
+      
     - name: Cache optimized images
+      if: steps.check-config.outputs.configured == 'true'
       uses: actions/cache@v3
       with:
         path: |
@@ -53,6 +93,7 @@ jobs:
           optimized-images-
       
     - name: Check for new/changed images
+      if: steps.check-config.outputs.configured == 'true'
       id: check-images
       run: |
         mkdir -p .image-cache
@@ -81,14 +122,14 @@ jobs:
         fi
       
     - name: Install ImageMagick and WebP tools
-      if: steps.check-images.outputs.images-found == 'true'
+      if: steps.check-config.outputs.configured == 'true' && steps.check-images.outputs.images-found == 'true'
       run: |
         sudo apt-get update -qq
         sudo apt-get install -y imagemagick webp
         echo "✅ ImageMagick and WebP tools installed"
       
     - name: Optimize images by folder type
-      if: steps.check-images.outputs.images-found == 'true'
+      if: steps.check-config.outputs.configured == 'true' && steps.check-images.outputs.images-found == 'true'
       run: |
         echo "🖼️ Starting optimization with settings:"
         echo "   Max resolution: ${{ env.MAX_WIDTH }}x${{ env.MAX_HEIGHT }}"
@@ -169,6 +210,7 @@ jobs:
         echo "🎉 Image optimization complete!"
         
     - name: Generate asset manifests
+      if: steps.check-config.outputs.configured == 'true'
       run: |
         echo "📋 Generating asset manifests for each folder..."
         
@@ -293,6 +335,7 @@ jobs:
         echo "🎉 All manifests generated!"
         
     - name: Commit optimized files back to repository
+      if: steps.check-config.outputs.configured == 'true'
       run: |
         # Configure git
         git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -334,12 +377,14 @@ jobs:
         fi
         
     - name: Configure AWS CLI for R2
+      if: steps.check-config.outputs.configured == 'true'
       run: |
         aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }}
         aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
         aws configure set default.region us-east-1
         
     - name: Sync to R2
+      if: steps.check-config.outputs.configured == 'true'
       run: |
         echo "🚀 Syncing to Cloudflare R2..."
         
