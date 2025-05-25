@@ -1,0 +1,363 @@
+name: Sync to Cloudflare R2 with Smart Image Optimization
+
+# 🎯 Configuration - Easy to customize
+env:
+  # Image optimization settings
+  MAX_WIDTH: 1920
+  MAX_HEIGHT: 1080
+  JPEG_QUALITY: 85
+  PNG_COMPRESSION: 9
+  WEBP_QUALITY: 85
+  
+  # CDN settings - CHANGE THESE FOR YOUR PROJECT
+  BASE_URL: "https://cdn.yourdomain.com"
+  CACHE_CONTROL: "public, max-age=31536000"
+  
+  # Deployment settings - CHANGE THIS
+  BUCKET_NAME: "your-bucket-name"
+  
+  # File type filters - Add/remove as needed
+  ALLOWED_EXTENSIONS: "png,jpg,jpeg,webp,gif,svg,mp3,wav,ogg,pdf,css,js,json,md,txt"
+
+on:
+  push:
+    branches: [ main ]
+
+# Add write permissions for the workflow
+permissions:
+  contents: write
+
+jobs:
+  optimize-and-sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+      
+    - name: Cache optimized images
+      uses: actions/cache@v3
+      with:
+        path: |
+          **/images/**/*.png
+          **/images/**/*.jpg
+          **/images/**/*.jpeg
+          **/images-webp/**/*.png
+          **/images-webp/**/*.jpg
+          **/images-webp/**/*.jpeg
+        key: optimized-images-${{ hashFiles('**/images/**/*.png', '**/images/**/*.jpg', '**/images/**/*.jpeg', '**/images-webp/**/*.png', '**/images-webp/**/*.jpg', '**/images-webp/**/*.jpeg') }}
+        restore-keys: |
+          optimized-images-
+      
+    - name: Check for new/changed images
+      id: check-images
+      run: |
+        mkdir -p .image-cache
+        
+        echo "🔍 Checking for images to process..."
+        
+        # Find images that need compression only (in 'images' folders)
+        find . -path "*/images/*" -name "*.png" -o -path "*/images/*" -name "*.jpg" -o -path "*/images/*" -name "*.jpeg" 2>/dev/null > .image-cache/compress-only.txt || true
+        
+        # Find images that need compression + WebP (in 'images-webp' folders)  
+        find . -path "*/images-webp/*" -name "*.png" -o -path "*/images-webp/*" -name "*.jpg" -o -path "*/images-webp/*" -name "*.jpeg" 2>/dev/null > .image-cache/compress-webp.txt || true
+        
+        # Check if we have any images to process
+        compress_count=$(wc -l < .image-cache/compress-only.txt 2>/dev/null || echo "0")
+        webp_count=$(wc -l < .image-cache/compress-webp.txt 2>/dev/null || echo "0")
+        total_images=$((compress_count + webp_count))
+        
+        if [ "$total_images" -gt 0 ]; then
+          echo "images-found=true" >> $GITHUB_OUTPUT
+          echo "📸 Found images to process:"
+          echo "  - Compress only: $compress_count images"
+          echo "  - Compress + WebP: $webp_count images"
+        else
+          echo "images-found=false" >> $GITHUB_OUTPUT
+          echo "ℹ️ No images found to process"
+        fi
+      
+    - name: Install ImageMagick and WebP tools
+      if: steps.check-images.outputs.images-found == 'true'
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y imagemagick webp
+        echo "✅ ImageMagick and WebP tools installed"
+      
+    - name: Optimize images by folder type
+      if: steps.check-images.outputs.images-found == 'true'
+      run: |
+        echo "🖼️ Starting optimization with settings:"
+        echo "   Max resolution: ${{ env.MAX_WIDTH }}x${{ env.MAX_HEIGHT }}"
+        echo "   JPEG quality: ${{ env.JPEG_QUALITY }}%"
+        echo "   WebP quality: ${{ env.WEBP_QUALITY }}%"
+        echo "   PNG compression: ${{ env.PNG_COMPRESSION }}"
+        echo ""
+        
+        # Function to optimize image
+        optimize_image() {
+          local img="$1"
+          local generate_webp="$2"
+          
+          if [ ! -f "$img" ]; then
+            return
+          fi
+          
+          echo "Processing: $img"
+          original_size=$(stat -c%s "$img")
+          
+          # Optimize based on file type
+          if [[ "$img" =~ \.(png|PNG)$ ]]; then
+            convert "$img" \
+              -resize "${{ env.MAX_WIDTH }}x${{ env.MAX_HEIGHT }}>" \
+              -strip \
+              -define png:compression-level=${{ env.PNG_COMPRESSION }} \
+              "$img.tmp"
+          else
+            convert "$img" \
+              -resize "${{ env.MAX_WIDTH }}x${{ env.MAX_HEIGHT }}>" \
+              -quality ${{ env.JPEG_QUALITY }} \
+              -strip \
+              "$img.tmp"
+          fi
+          
+          # Replace if optimized version is smaller
+          new_size=$(stat -c%s "$img.tmp")
+          if [ "$new_size" -lt "$original_size" ]; then
+            mv "$img.tmp" "$img"
+            echo "  ✅ Optimized: ${original_size} → ${new_size} bytes"
+          else
+            rm "$img.tmp"
+            echo "  ℹ️ Already optimal: ${original_size} bytes"
+          fi
+          
+          # Generate WebP if requested
+          if [ "$generate_webp" = "true" ]; then
+            webp_file="${img%.*}.webp"
+            if [ ! -f "$webp_file" ]; then
+              cwebp -q ${{ env.WEBP_QUALITY }} "$img" -o "$webp_file"
+              webp_size=$(stat -c%s "$webp_file" 2>/dev/null || echo "0")
+              savings=$(( (original_size - webp_size) * 100 / original_size ))
+              echo "  🚀 WebP created: ${webp_size} bytes (${savings}% smaller)"
+            else
+              echo "  ℹ️ WebP already exists"
+            fi
+          fi
+        }
+        
+        # Process compress-only images (images/ folders)
+        if [ -s ".image-cache/compress-only.txt" ]; then
+          echo "📁 Processing images/ folders (compress only):"
+          while read img; do
+            optimize_image "$img" false
+          done < .image-cache/compress-only.txt
+          echo ""
+        fi
+        
+        # Process compress + WebP images (images-webp/ folders)
+        if [ -s ".image-cache/compress-webp.txt" ]; then
+          echo "🌐 Processing images-webp/ folders (compress + WebP):"
+          while read img; do
+            optimize_image "$img" true
+          done < .image-cache/compress-webp.txt
+          echo ""
+        fi
+        
+        echo "🎉 Image optimization complete!"
+        
+    - name: Generate asset manifests
+      run: |
+        echo "📋 Generating asset manifests for each folder..."
+        
+        # Convert allowed extensions to array for checking
+        IFS=',' read -ra ALLOWED_EXTS <<< "${{ env.ALLOWED_EXTENSIONS }}"
+        
+        # Function to check if file extension is allowed
+        is_allowed_extension() {
+          local file_ext="${1##*.}"
+          file_ext=$(echo "$file_ext" | tr '[:upper:]' '[:lower:]')
+          
+          for ext in "${ALLOWED_EXTS[@]}"; do
+            if [ "$file_ext" = "$ext" ]; then
+              return 0
+            fi
+          done
+          return 1
+        }
+        
+        # Function to generate manifest for a folder
+        generate_manifest() {
+          folder=$1
+          timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          echo "Generating manifest for: $folder"
+          
+          # Initialize variables
+          file_count=0
+          total_size=0
+          files_json=""
+          
+          # Collect all files in the folder with allowed extensions
+          while IFS= read -r -d '' file; do
+            # Skip manifest.json and .gitkeep
+            if [[ "$(basename "$file")" == "manifest.json" || "$(basename "$file")" == ".gitkeep" ]]; then
+              continue
+            fi
+            
+            # Check if file extension is allowed
+            if ! is_allowed_extension "$file"; then
+              continue
+            fi
+            
+            # Get file info
+            relative_path="${file#$folder/}"
+            file_size=$(stat -c%s "$file" 2>/dev/null || echo "0")
+            file_type=""
+            
+            # Determine file type
+            case "${file##*.}" in
+              png|PNG) file_type="image/png" ;;
+              jpg|jpeg|JPG|JPEG) file_type="image/jpeg" ;;
+              webp|WEBP) file_type="image/webp" ;;
+              gif|GIF) file_type="image/gif" ;;
+              svg|SVG) file_type="image/svg+xml" ;;
+              mp3|MP3) file_type="audio/mpeg" ;;
+              wav|WAV) file_type="audio/wav" ;;
+              ogg|OGG) file_type="audio/ogg" ;;
+              pdf|PDF) file_type="application/pdf" ;;
+              txt|TXT) file_type="text/plain" ;;
+              md|MD) file_type="text/markdown" ;;
+              css|CSS) file_type="text/css" ;;
+              js|JS) file_type="application/javascript" ;;
+              json|JSON) file_type="application/json" ;;
+              *) file_type="application/octet-stream" ;;
+            esac
+            
+            # Add to running totals
+            file_count=$((file_count + 1))
+            total_size=$((total_size + file_size))
+            
+            # Build file entry
+            if [ "$file_count" -gt 1 ]; then
+              files_json="$files_json,"
+            fi
+            
+            files_json="$files_json
+            {
+              \"name\": \"$(basename "$file")\",
+              \"path\": \"$relative_path\",
+              \"url\": \"${{ env.BASE_URL }}/$file\",
+              \"size\": $file_size,
+              \"type\": \"$file_type\",
+              \"extension\": \"${file##*.}\",
+              \"optimization\": \"$(if [[ "$relative_path" == images-webp/* ]]; then echo "webp"; else echo "compress"; fi)\"
+            }"
+          done < <(find "$folder" -type f -print0 | sort -z)
+          
+          # Build complete JSON
+          cat > "$folder/manifest.json" << EOF
+        {
+          "folder": "$folder",
+          "base_url": "${{ env.BASE_URL }}",
+          "generated_at": "$timestamp",
+          "total_files": $file_count,
+          "total_size": $total_size,
+          "allowed_extensions": "${{ env.ALLOWED_EXTENSIONS }}",
+          "optimization": {
+            "max_width": ${{ env.MAX_WIDTH }},
+            "max_height": ${{ env.MAX_HEIGHT }},
+            "jpeg_quality": ${{ env.JPEG_QUALITY }},
+            "folder_rules": {
+              "images/": "compress only",
+              "images-webp/": "compress + webp generation"
+            }
+          },
+          "files": [$(echo "$files_json" | sed 's/^[[:space:]]*//')
+          ]
+        }
+        EOF
+          
+          echo "  ✅ $folder/manifest.json created ($file_count files, $total_size bytes)"
+        }
+        
+        # Find all folders with images and generate manifests
+        for folder in $(find . -path "*/images/*" -o -path "*/images-webp/*" | cut -d'/' -f2 | sort -u); do
+          if [ -d "$folder" ] && [ "$folder" != "." ]; then
+            generate_manifest "$folder"
+          fi
+        done
+        
+        echo "🎉 All manifests generated!"
+        
+    - name: Commit optimized files back to repository
+      run: |
+        # Configure git
+        git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
+        
+        # Add all changes
+        git add .
+        
+        # Check if there are changes to commit
+        if git diff --staged --quiet; then
+          echo "📋 No changes to commit"
+        else
+          git commit -m "🤖 Auto-optimize images and update manifests [skip ci]"
+          
+          # Push with retry logic
+          max_attempts=3
+          attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            echo "Attempting to push (attempt $attempt/$max_attempts)..."
+            
+            if git push origin HEAD:main; then
+              echo "✅ Successfully pushed changes to repository"
+              break
+            else
+              echo "❌ Push failed, attempt $attempt/$max_attempts"
+              if [ $attempt -lt $max_attempts ]; then
+                echo "Waiting 5 seconds before retry..."
+                sleep 5
+                git pull --rebase origin main
+              else
+                echo "❌ All push attempts failed"
+                exit 1
+              fi
+            fi
+            
+            attempt=$((attempt + 1))
+          done
+        fi
+        
+    - name: Configure AWS CLI for R2
+      run: |
+        aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }}
+        aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        aws configure set default.region us-east-1
+        
+    - name: Sync to R2
+      run: |
+        echo "🚀 Syncing to Cloudflare R2..."
+        
+        # Sync all folders that contain images
+        for folder in $(find . -path "*/images/*" -o -path "*/images-webp/*" | cut -d'/' -f2 | sort -u); do
+          if [ -d "$folder" ] && [ "$folder" != "." ]; then
+            echo "📁 Syncing $folder/ to R2..."
+            aws s3 sync "$folder/" "s3://${{ env.BUCKET_NAME }}/$folder/" \
+              --endpoint-url "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com" \
+              --delete --exact-timestamps --cache-control "${{ env.CACHE_CONTROL }}"
+            echo "  ✅ $folder/ synced successfully"
+          fi
+        done
+          
+        echo "✅ All assets synced successfully! 🚀"
+        echo ""
+        echo "📁 Folder Structure:"
+        echo "  - images/ → compress only"
+        echo "  - images-webp/ → compress + WebP generation"
+        echo ""
+        echo "🌐 Your assets are now available at: ${{ env.BASE_URL }}"

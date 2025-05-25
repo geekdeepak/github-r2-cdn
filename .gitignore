@@ -1,0 +1,23 @@
+# Cache files
+.image-cache/
+*.tmp
+
+# OS files  
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+
+# Log files
+*.log
+
+# Temporary files
+*~
+*.swp
+*.swo
+
+# Test outputs
+test-images/
+demo-output/
